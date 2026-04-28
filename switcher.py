@@ -1,23 +1,34 @@
 import obspython as obs
-import time
 from Xlib import display as xdisplay
 from screeninfo import get_monitors
 
 CURSOR_CHECK_INTERVAL_MS = 100
-active_display = None
-display_sources = {}
 
+active_display = None
 d = xdisplay.Display()
 root = d.screen().root
-monitors = get_monitors()
+
+
+def log(msg):
+    obs.script_log(obs.LOG_INFO, f"[cursor-switcher] {msg}")
 
 
 def script_description():
-    return """Multi-Monitor Cursor Tracking for OBS Studio (Linux / i3)
+    return """
+Multi-Monitor Cursor Tracking for OBS Studio Linux / i3
 
-Tracks mouse position and switches OBS Display Capture sources named:
-Display 1, Display 2, ... according to active monitor.
+Tracks mouse position and shows only the OBS scene item named:
+Display 1, Display 2, Display 3, ...
+
+Important:
+Use scene sources/items named exactly Display 1, Display 2, etc.
 """
+
+
+def script_load(settings):
+    log_monitors()
+    obs.timer_remove(check_cursor_position)
+    obs.timer_add(check_cursor_position, CURSOR_CHECK_INTERVAL_MS)
 
 
 def script_update(settings):
@@ -29,15 +40,24 @@ def script_unload():
     obs.timer_remove(check_cursor_position)
 
 
+def log_monitors():
+    monitors = get_monitors()
+    for i, m in enumerate(monitors):
+        log(f"Display {i + 1}: x={m.x}, y={m.y}, w={m.width}, h={m.height}")
+
+
 def get_cursor_position():
     data = root.query_pointer()._data
     return data["root_x"], data["root_y"]
 
 
 def get_display_from_pos(x, y):
+    monitors = get_monitors()
+
     for i, m in enumerate(monitors):
         if m.x <= x < m.x + m.width and m.y <= y < m.y + m.height:
-            return f"Display {i+1}"
+            return f"Display {i + 1}"
+
     return None
 
 
@@ -47,6 +67,9 @@ def check_cursor_position():
     x, y = get_cursor_position()
     current_display = get_display_from_pos(x, y)
 
+    if current_display is None:
+        return
+
     if current_display != active_display:
         toggle_display_sources(current_display)
 
@@ -54,45 +77,61 @@ def check_cursor_position():
 def toggle_display_sources(current_display):
     global active_display
 
-    for display, source in display_sources.items():
-        enabled = (display == current_display)
-        obs.obs_source_set_enabled(source, enabled)
-
-    active_display = current_display
-
-
-def script_load(settings):
-    global display_sources
-    display_sources.clear()
-
-    scene = obs.obs_frontend_get_current_scene()
-    if scene is None:
-        return
-
-    scene_source = obs.obs_scene_from_source(scene)
+    scene_source = obs.obs_frontend_get_current_scene()
     if scene_source is None:
-        obs.obs_source_release(scene)
         return
 
-    scene_items = obs.obs_scene_enum_items(scene_source)
+    scene = obs.obs_scene_from_source(scene_source)
+    if scene is None:
+        obs.obs_source_release(scene_source)
+        return
+
+    scene_items = obs.obs_scene_enum_items(scene)
+    if scene_items is None:
+        obs.obs_source_release(scene_source)
+        return
+
+    items = []
 
     for item in scene_items:
         source = obs.obs_sceneitem_get_source(item)
         if source:
             name = obs.obs_source_get_name(source)
+
             if name.startswith("Display "):
-                display_sources[name] = source
+                items.append((item, name))
+
+    names = [name for _, name in items]
+
+    if current_display not in names:
+        log(f"Could not find scene item named {current_display}. Found: {names}")
+        obs.sceneitem_list_release(scene_items)
+        obs.obs_source_release(scene_source)
+        return
+
+    for item, name in items:
+        visible = name == current_display
+        obs.obs_sceneitem_set_visible(item, visible)
+
+    active_display = current_display
+    log(f"Switched to {current_display}")
 
     obs.sceneitem_list_release(scene_items)
-    obs.obs_source_release(scene)
+    obs.obs_source_release(scene_source)
 
 
 def script_properties():
     props = obs.obs_properties_create()
-    obs.obs_properties_add_button(props, "refresh", "Refresh Display Sources", refresh_display_sources)
+    obs.obs_properties_add_button(
+        props,
+        "refresh",
+        "Print Monitor Mapping",
+        refresh_display_sources
+    )
     return props
 
 
 def refresh_display_sources(props, prop):
-    script_load(None)
+    log_monitors()
+    active_display = None
     return True
